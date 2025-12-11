@@ -256,35 +256,35 @@ def plot_loss_curves(losses_dict, save_name="loss_curves.png"):
 
 if __name__ == "__main__":
 
-    # ds = SinGapDataset(num_samples=500)
-    # # ds = VariableDensitySinDataset(num_samples=500, density_ratio=0.1)
-    # # ds = MultiGapSinDataset(num_samples=500)
+    ds = SinGapDataset(num_samples=500)
+    # ds = VariableDensitySinDataset(num_samples=500, density_ratio=0.1)
+    # ds = MultiGapSinDataset(num_samples=500)
     
-    # # 1. Train Marginalize BLL
+    # 1. Train Marginalize BLL
     
-    # print("\n--- Training Marginalize BLL ---")
-    # model_bll = MarginalizeBLL().to(DEVICE)
-    # model_bll, bll_losses = train_marginalize_ldbll(model_bll, ds, is_ldbll=False)
+    print("\n--- Training Marginalize BLL ---")
+    model_bll = MarginalizeBLL().to(DEVICE)
+    model_bll, bll_losses = train_marginalize_ldbll(model_bll, ds, is_ldbll=False)
     
-    # # 2. Train LDBLL
-    # print("\n--- Training LDBLL ---")
-    # model_ldbll = LDBLL().to(DEVICE)
-    # model_ldbll, ldbll_losses = train_marginalize_ldbll(model_ldbll, ds, is_ldbll=True, beta=0.005, epochs=4500)
+    # 2. Train LDBLL
+    print("\n--- Training LDBLL ---")
+    model_ldbll = LDBLL().to(DEVICE)
+    model_ldbll, ldbll_losses = train_marginalize_ldbll(model_ldbll, ds, is_ldbll=True, beta=0.005, epochs=4500)
     
-    # model_ldbll_less = LDBLL().to(DEVICE)
-    # model_ldbll_less, ldbll_losses_less = train_marginalize_ldbll(model_ldbll_less, ds, is_ldbll=True, beta=0.005, epochs=2000)
+    model_ldbll_less = LDBLL().to(DEVICE)
+    model_ldbll_less, ldbll_losses_less = train_marginalize_ldbll(model_ldbll_less, ds, is_ldbll=True, beta=0.005, epochs=2000)
 
-    # models_to_plot = {
-    #     'Marginalize BLL (Baseline)': model_bll,
-    #     'LDBLL (Derivative Reg)': model_ldbll,
-    #     'LDBLL (Less Training)': model_ldbll_less
-    # }
+    models_to_plot = {
+        'Marginalize BLL (Baseline)': model_bll,
+        'LDBLL (Derivative Reg)': model_ldbll,
+        'LDBLL (Less Training)': model_ldbll_less
+    }
 
-    # losses_to_plot = {
-    #     'Marginalize BLL': bll_losses,
-    #     'LDBLL': ldbll_losses,
-    #     'LDBLL (Less Training)': ldbll_losses_less
-    # }
+    losses_to_plot = {
+        'Marginalize BLL': bll_losses,
+        'LDBLL': ldbll_losses,
+        'LDBLL (Less Training)': ldbll_losses_less
+    }
 
 
     ds = SinGapDataset(num_samples=500, manual_gap_points=[0])
@@ -300,9 +300,9 @@ if __name__ == "__main__":
     
     # Plotting Results
 
-    # visualize_models(models_to_plot, ds, DEVICE, save_name="plots/bll_vs_ldbll_compare.png")
+    visualize_models(models_to_plot, ds, DEVICE, save_name="plots/bll_vs_ldbll_compare.png")
     
-    # plot_loss_curves(losses_to_plot, save_name="plots/bll_vs_ldbll_loss_curves.png")
+    plot_loss_curves(losses_to_plot, save_name="plots/bll_vs_ldbll_loss_curves.png")
     
     visualize_models({
        'Variational BLL': vbll, 

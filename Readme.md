@@ -16,23 +16,61 @@ Modern neural networks often yield overconfident predictions on OOD data. The BL
 
 While the original proposal aimed to explore "Adaptive Priors," our initial reproduction phase revealed that scalability was a more critical bottleneck. Consequently, the project focus shifted to merging the **Latent Derivative Prior** (for robustness) with **Variational Inference** (for scalability).
 
-## 3. Methodology
+## 3. Theoretical Background and Methodology
 
-### 3.1 Baseline: BLL and LDBLL
-I first implemented the standard BLL and LDBLL as described by Watson et al..
-* **BLL:** Maximizes the marginal likelihood.
-* **LDBLL:** Adds a functional regularization term $D_{KL}(\pi(z)||p(z))$, where $z$ is the Jacobian of the network output w.r.t. the input. This forces the function to maintain "smoothness" and uncertainty OOD.
+To contextualize the proposed Hybrid model, I must first rigorously define the two frameworks it bridges: the regularization mechanics of Latent Derivative BLLs and the inference mechanics of Variational BLLs.
 
-### 3.2 Transition to Variational Inference (VBLL)
-To address the BLL's requirement for exact matrix inversion (which prohibits standard mini-batch training), I implemented Variational BLL. Instead of calculating the exact posterior, VBLL approximates it using a variational distribution $q(w|\eta)$. The objective becomes maximizing the Evidence Lower Bound (ELBO):
-$$\mathcal{L}_{ELBO} = \mathbb{E}_{q(w)}[\log p(y|x, w)] - D_{KL}(q(w)||p(w))$$
-This allows for standard backpropagation updates using AdamW, enabling batching.
+### 3.1 Latent Derivative Bayesian Last Layers (LDBLL)
+The LDBLL framework, introduced by Watson et al. (2021), addresses the pathology where Bayesian Last Layers (BLL) learn feature maps $\phi(x)$ that collapse onto a deterministic mean function in out-of-distribution (OOD) regions. While the last layer $w$ is Bayesian, the features $\phi(x)$ are trained via Type-II Maximum Likelihood (optimizing the marginal likelihood), which tends to result in over-confident feature representations.
 
-### 3.3 Novel Contribution: Hybrid Variational LDBLL
-I observed that while VBLL converges faster, it retains the BLL's weakness of OOD overconfidence (see Section 4). To resolve this, I integrated the Latent Derivative prior into the VBLL objective.
+#### 3.1.1 The Intuition: Controlling the Jacobian
+The core insight of LDBLL is that epistemic uncertainty OOD is inextricably linked to the sensitivity of the function $f(x)$ to its inputs. Consider a first-order Taylor expansion of the network around an input $x$:
+$$f(x + \delta) \approx f(x) + \nabla_x f(x)^T \delta$$
+the above Taylor approximation illustrates how z influences the predictive uncertainty as the perturbation δ grows. As typical regression problems only consider directly corresponding pairs (y,  ̄x,0), this latent variable perspective is irrelevant for the training data as δ = 0. However, by characterizing prediction between and outside the training data as δ != 0, one can appreciate how controlling the distribution of z influences the epistemic uncertainty in the predictions. 
+For a linear Bayesian model $f(x) = w^T \phi(x)$, the gradient with respect to the input is:
+$$z(x) := \nabla_x f(x) = \nabla_x (w^T \phi(x)) = (\nabla_x \phi(x))^T w = J_{\phi}(x)^T w$$
+where $J_{\phi}(x)$ is the Jacobian of the features. Because $w$ follows a Gaussian posterior $p(w|\mathcal{D}) = \mathcal{N}(\mu_N, \Sigma_N)$, the latent derivative $z(x)$ is also Gaussian distributed (as it is a linear transformation of Gaussian weights):
+$$p(z | x, \mathcal{D}) = \mathcal{N}(z \mid J_{\phi}^T \mu_N, \, J_{\phi}^T \Sigma_N J_{\phi})$$
 
-The new loss function is:
-$$\mathcal{L}_{Total} = -\mathcal{L}_{ELBO} + \beta \cdot \text{Reg}_{derivative}$$
+If the model learns features such that $J_{\phi}(x) \to 0$ in OOD regions (a common failure mode), the variance of $z$ collapses to zero. This implies the function becomes flat and deterministic OOD.
+
+#### 3.1.2 Functional Regularization via Index Sets
+To prevent this collapse, LDBLL places a **Functional Prior** $\pi(z)$ on the derivatives. A typical choice is a zero-mean Gaussian process with high variance, $\pi(z) = \mathcal{N}(0, \gamma I)$, which encodes the belief that "I do not know how the function changes OOD, so the gradient could be anything."
+
+The training objective augments the standard Marginal Likelihood with a Functional KL divergence ($D_{KL}$) term. Since calculating $D_{KL}$ over the entire input domain is intractable, Watson et al. approximate it using a finite **Index Set** $\mathcal{T}$ (points sampled near the training data with additive noise):
+
+$$\mathcal{L}_{LDBLL} = \log p(\mathcal{D} | \theta) - \frac{\beta}{|\mathcal{T}|} \sum_{x \in \mathcal{T}} D_{KL}\Big( \pi(z|x) \,||\, p(z|x, \mathcal{D}) \Big)$$
+
+Crucially, Watson et al. utilize the **Forward KL** (Prior || Posterior). This encourages the posterior distribution of the Jacobian to "cover" the high-variance prior, forcing the model to maintain high predictive uncertainty in function space where data is sparse.
+
+### 3.2 Variational Bayesian Last Layers (VBLL)
+The standard BLL and LDBLL rely on exact inference to compute the posterior covariance $\Sigma_N = (\Sigma_0^{-1} + \sigma^{-2}\Phi^T\Phi)^{-1}$. This operation is $O(D^3)$ or requires $O(N)$ updates, making it computationally intractable for large datasets or mini-batch training.
+
+Harrison et al. (2024) propose VBLL to solve this by approximating the exact posterior $p(w|\mathcal{D})$ with a variational distribution $q(w|\eta) = \mathcal{N}(\mu_q, S_q)$.
+
+#### 3.2.1 The Objective (Regression)
+I maximize the Evidence Lower Bound (ELBO):
+$$\mathcal{L}_{ELBO} = \mathbb{E}_{q(w)} [\log p(y|x, w)] - D_{KL}(q(w) || p(w))$$
+
+For the regression case with likelihood $y \sim \mathcal{N}(w^T\phi(x), \sigma^2)$, the expected log-likelihood term has a closed-form solution that enables efficient computation. Harrison et al. derive this as:
+
+$$\mathbb{E}_{q(w)} [\log p(y|x, w)] = \log \mathcal{N}(y \mid \mu_q^T \phi(x), \sigma^2) - \frac{1}{2\sigma^2} \text{Tr}(\phi(x)^T S_q \phi(x))$$
+
+**Interpretation:**
+1.  **Mean Fit:** The first term maximizes the fit of the mean prediction $\mu_q^T \phi(x)$ to the data.
+2.  **Uncertainty Penalty:** The trace term $\text{Tr}(\phi^T S_q \phi)$ penalizes the model if the predictive variance is high where the prediction error is high.
+
+This formulation reduces the computational complexity to $O(D^2)$ (due to matrix-vector multiplications with $S_q$) and allows $S_q$ and $\mu_q$ to be learned via standard backpropagation on mini-batches, solving the scalability bottleneck.
+
+### 3.3 The Proposed Approach: Hybrid Variational LDBLL
+My contribution merges the robustness of Section 3.1 with the scalability of Section 3.2.
+
+The standard VBLL efficiently fits the data but, like the BLL, does not inherently prevent feature collapse OOD (the trace penalty in VBLL only acts on *observed* data). By injecting the Latent Derivative Regularization from LDBLL into the VBLL optimization loop, I force the variational posterior $S_q$ to support a broad distribution of gradients.
+
+The resulting Hybrid loss function is:
+$$\mathcal{L}_{Hybrid} = \underbrace{-\left( \log \mathcal{N}(y | \mu_q^T \phi, \sigma^2) - \frac{1}{2\sigma^2} \text{Tr}(\phi^T S_q \phi) \right) + D_{KL}(q(w)||p(w))}_{\text{VBLL Negative ELBO}} + \underbrace{\beta \cdot D_{KL}(\pi(z) || q(z))}_{\text{LDBLL Derivative Reg}}$$
+
+This enables a scalable, batch-friendly BNN that maintains calibrated "bell-shaped" uncertainty in data gaps, effectively mimicking a Gaussian Process without the cubic scaling costs.
 
 **The Derivative Regularization (Forward KL):**
 Crucially, I implemented the regularization using **Forward KL** divergence $D_{KL}(P_{\text{prior}} || Q_{\text{posterior}})$, unlike the Reverse KL used in standard VI.
