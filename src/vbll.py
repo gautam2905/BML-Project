@@ -17,25 +17,16 @@ class VariationalBLL(nn.Module):
             nn.LeakyReLU(), 
             nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(),
-            # Output dim is feature_dim
             nn.Linear(hidden_dim, feature_dim) 
         )
         
-        # FIX 3: Last Layer Dimension + 1 for Bias
-        # We will append a column of 1s to features, so weights need +1 dim
-        self.last_layer_dim = feature_dim + 1
+        self.w_mean = nn.Parameter(torch.zeros(self.feature_dim, 1))
         
-        # Variational Posterior Parameters q(w) ~ N(w_mean, S)
-        self.w_mean = nn.Parameter(torch.zeros(self.last_layer_dim, 1))
+        self.l_offdiag = nn.Parameter(torch.zeros(self.feature_dim, self.feature_dim))
+        self.l_log_diag = nn.Parameter(torch.zeros(self.feature_dim)) 
         
-        # S = L @ L.T parameterization
-        self.l_offdiag = nn.Parameter(torch.zeros(self.last_layer_dim, self.last_layer_dim))
-        self.l_log_diag = nn.Parameter(torch.zeros(self.last_layer_dim)) 
-
-        # Noise parameterization: log(1/sigma^2)
         self.log_prec = nn.Parameter(torch.tensor(0.0)) 
 
-        # Hyperparameters (Appendix C.4 [cite: 784])
         self.prior_nu = 1.0 
         self.prior_scale = 1.0
         
@@ -44,16 +35,11 @@ class VariationalBLL(nn.Module):
     def get_features(self, x):
         """Computes phi(x) and appends a bias column of 1s"""
         phi = self.net(x)
-        batch_size = phi.shape[0]
-        # Append column of ones for bias
-        ones = torch.ones(batch_size, 1).to(phi.device)
-        return torch.cat([phi, ones], dim=1)
+        return phi
     
     def get_post_cov(self):
-        # Create Lower Triangular Mask
         mask = torch.tril(torch.ones_like(self.l_offdiag), diagonal=-1)
         L = self.l_offdiag * mask
-        # Add diagonal (must be positive, so use exp)
         L = L + torch.diag(torch.exp(self.l_log_diag))
         S = L @ L.T
         return S, L
@@ -62,7 +48,7 @@ class VariationalBLL(nn.Module):
         phi = self.get_features(x)
         S, _ = self.get_post_cov()
         
-        # FIX 1: Correct variable name (log_prec)
+        # Correct variable name (log_prec)
         precision = torch.exp(self.log_prec)
         sigma_sq = 1.0 / precision
         
@@ -106,7 +92,7 @@ class VariationalBLL(nn.Module):
         # Assuming Prior W ~ N(0, I/s) where s=1 (isotropic standard normal)
         tr_S = torch.sum(L ** 2) 
         mu_sq = torch.sum(self.w_mean**2)
-        k = self.last_layer_dim # Adjusted for bias
+        k = self.feature_dim # Adjusted for bias
         log_det_S = 2 * torch.sum(self.l_log_diag)
         
         kl_last_layer = 0.5 * (tr_S + mu_sq - k - log_det_S)

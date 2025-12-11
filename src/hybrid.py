@@ -1,62 +1,56 @@
 import torch
 import torch.nn as nn
 from torch.func import vmap, jacrev
-from .vbll import VariationalBLL  # Assumes the CORRECTED VariationalBLL from previous step
+from .vbll import VariationalBLL
 
-class HybridLDBLL(VariationalBLL):
-    """
-    Hybrid Model:
-    1. Uses Variational Inference for weights (VBLL architecture).
-    2. Adds the Derivative Regularization term (LDBLL prior) for OOD robustness.
-    """
+class VariationalLDBLL(VariationalBLL): # Inherits from your fixed VBLL class
+    def __init__(self, in_dim=1, feature_dim=50, hidden_dim=64):
+        super().__init__(in_dim, feature_dim, hidden_dim)
+        
     def compute_derivative_reg(self, x, beta=1.0, gamma=0.1):
         """
-        Computes LDBLL Regularization using FORWARD KL.
-        Minimizing KL( Prior || Posterior ) where Prior ~ N(0, I).
+        Computes the Latent Derivative Regularization (Forward KL).
         
-        Effect:
-        1. Penalizes large slopes (mu_grad) -> Smoothes the mean (removes sharp jump).
-        2. Penalizes small variance (var_grad) -> Inflates uncertainty in the gap.
+        Args:
+            x: Input data batch
+            beta: Weight of the regularization term
+            gamma: Noise standard deviation for perturbation (Paper Sec 3 "Index Set")
         """
-        # 1. Perturb input to "touch" the gap
-        # If the gap is wide (e.g., -2 to 2), gamma must be large enough 
-        # for these samples to fall INTO the gap. 
-        # Try gamma=0.2 or 0.3 if the jump persists.
-        noise = torch.randn_like(x) * gamma 
+        noise = torch.randn_like(x) * gamma
         s = x + noise
         
-        # 2. Compute Jacobian J_phi (same as before)
         def get_phi(x_in):
             return self.net(x_in.unsqueeze(0)).squeeze(0)
             
+        # J_phi shape: [Batch, Feature_Dim, Input_Dim]
         J_phi = vmap(jacrev(get_phi))(s)
-        if J_phi.ndim == 4: J_phi = J_phi.squeeze(1)
-            
-        # 3. Compute Posterior of the Gradient (z) (same as before)
-        J_T = J_phi.transpose(1, 2)
-        S, _ = self.get_post_cov()
         
-        # Mean Slope (The cause of the sharp jump)
-        mu_grad = J_T @ self.w_mean 
+        S, _ = self.get_post_cov() 
         
-        # Variance of Slope (The cause of the pinched uncertainty)
-        # sum((J^T @ S) * J^T, dim=2)
-        var_grad = torch.sum((J_T @ S) * J_T, dim=2, keepdim=True)
+        # Mean derivative: J_phi^T @ w_mean
+        # Shape: [Batch, Input_Dim]
+        z_mean = torch.einsum("n f d, f k -> n d", J_phi, self.w_mean)
         
-        # 4. FORWARD KL Implementation
-        # Formula: 0.5 * ( (var_prior + (mu_post - mu_prior)^2) / var_post  + log(var_post) - 1 )
-        # With Prior N(0, 1):
-        # term1 = (1 + mu_grad^2) / var_grad
+        # Variance of derivative: diag(J_phi^T @ S @ J_phi)
+        # We only need the diagonal variance for the KL computation
+        # Shape: [Batch, Input_Dim]
+        z_var = torch.einsum("n f d, f h, n h d -> n d", J_phi, S, J_phi)       
+        z_var_clamped = torch.clamp(z_var, min=1e-6)
         
-        eps = 1e-6
+        # 4. Define Prior over Derivatives: p(z)
+        prior_var = torch.ones_like(z_var) 
         
-        # This term punishes the model if the variance is small.
-        # It ALSO punishes the model if mu_grad is large (steep slope).
-        trace_term = (1.0 + mu_grad**2) / (var_grad + eps)
+        # 5. Compute Forward KL: KL( p(z) || q(z|s) )
+        # Formula: 0.5 * ( (var_p / var_q) + (mu_q - mu_p)^2 / var_q - 1 + log(var_q / var_p) )
         
-        log_term = torch.log(var_grad + eps)
+        var_ratio = prior_var / z_var_clamped
+        mean_diff_sq = z_mean.pow(2)
         
-        # Total KL
-        kl = 0.5 * (trace_term + log_term - 1.0)
+        kl_div = 0.5 * ( 
+            var_ratio + 
+            (mean_diff_sq / z_var_clamped) - 
+            1 + 
+            torch.log(z_var_clamped / prior_var) 
+        )
         
-        return beta * kl.mean()
+        return beta * kl_div.mean()

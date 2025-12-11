@@ -3,11 +3,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from src.dataset import SinGapDataset, get_test_grid, DEVICE
+from src.dataset import SinGapDataset, DEVICE, VariableDensitySinDataset, MultiGapSinDataset
 from src.bll import MarginalizeBLL
 from src.ldbll import LDBLL
 from src.vbll import VariationalBLL
-from src.hybrid import HybridLDBLL
+from src.hybrid import VariationalLDBLL
 
 def train_marginalize_ldbll(model, dataset, epochs=2000, lr=0.001, is_ldbll=False, beta=0.01):
     """
@@ -54,9 +54,6 @@ def train_marginalize_ldbll(model, dataset, epochs=2000, lr=0.001, is_ldbll=Fals
     return model, losses
 
 def train_variational(model, dataset, epochs=1000, lr=1e-3):
-    # FIX 2: Correct Optimizer Groups to avoid double regularization
-    # Feature extractor gets weight decay
-    # Variational parameters (last layer) get NO weight decay (handled by KL/Prior)
     
     variational_params = {
         'w_mean', 'l_offdiag', 'l_log_diag', 'log_prec'
@@ -80,7 +77,7 @@ def train_variational(model, dataset, epochs=1000, lr=1e-3):
 
     # Use the full batch if dataset is small (common in these toy gap examples)
     # or ensure KL weight is scaled by 1/N_total if using mini-batches.
-    loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
     N = len(dataset)
     
     model.train()
@@ -111,50 +108,61 @@ def train_variational(model, dataset, epochs=1000, lr=1e-3):
             
     return model, losses
 
-def train_hybrid(model, dataset, epochs=2000, lr=0.005, beta=1.0):
-    """
-    Training loop for Hybrid VBLL + LDBLL.
-    """
-    # Use clip_grad_norm to prevent exploding gradients typical in derivative training
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+def train_variational_ldbll(model, dataset, epochs=1000, lr=1e-3, ld_beta=0.1):
+    # Optimizer setup (Same as before)
+    variational_params = {'w_mean', 'l_offdiag', 'l_log_diag', 'log_prec'}
+    params_net = []
+    params_var = []
+    losses = []
     
-    # Simple full-batch or mini-batch loader
-    loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+    for name, param in model.named_parameters():
+        if any(v_name in name for v_name in variational_params):
+            params_var.append(param)
+        else:
+            params_net.append(param)
+
+    opt = torch.optim.AdamW([
+        {'params': params_net, 'weight_decay': 1e-2},
+        {'params': params_var, 'weight_decay': 0.0} 
+    ], lr=lr)
+
+    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
     N = len(dataset)
     
-    pbar = tqdm(range(epochs), desc="Training Hybrid Model")
-    
+    model.train()
+
+    pbar = tqdm(range(epochs), desc="Training Variational LDBLL")
     for _ in pbar:
-        total_nll = 0
-        total_reg = 0
-        
+        epoch_loss = 0
+        loss_epoch = []
         for x, y in loader:
-            # 1. VBLL Objective: Expected Log Likelihood + Parameter KL
-            # This trains the model to fit data and maintain weight uncertainty
-            # We scale KL by 1/N because compute_train_loss returns sum-like scale for NLL
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            
+            # 1. Compute Standard VBLL Loss (ELBO)
+            # kl_weight scaled by 1/N as per standard practice
             vbll_loss = model.compute_train_loss(x, y, kl_weight=1.0/N)
             
-            # 2. LDBLL Regularization: Derivative KL
-            # This forces the gradient of the function to be "smooth" (close to 0 prior) 
-            # where data is sparse, preventing overfitting.
-            ld_reg = model.compute_derivative_reg(x, beta=beta, gamma=0.1)
+            # 2. Compute Latent Derivative Regularization
+            # This uses the perturbed samples internally
+            ld_loss = model.compute_derivative_reg(x, beta=ld_beta, gamma=0.1)
             
-            loss = vbll_loss + ld_reg
-            
+            # 3. Total Loss
+            loss = vbll_loss + ld_loss
+            loss_epoch.append(loss.item())
             opt.zero_grad()
             loss.backward()
-            
-            # Critical for stability when optimizing derivatives
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
             
-            total_nll += vbll_loss.item()
-            total_reg += ld_reg.item()
-            
-        pbar.set_postfix({"VBLL_Loss": total_nll / len(loader), "LD_Reg": total_reg / len(loader)})
-            
-    return model
+            epoch_loss += loss.item()
+
+        losses.append(np.array(loss_epoch).mean())
+        pbar.set_postfix({'loss': epoch_loss / len(loader)})
+
+        # if epoch % 100 == 0:
+            # print(f"Epoch {epoch} | Total Loss: {epoch_loss/len(loader):.4f} | VBLL: {vbll_loss.item():.4f} | LD: {ld_loss.item():.4f}")
+
+    return model, losses
 
 def visualize_models(models_dict, dataset, device, save_name="model_comparison.png"):
     """
@@ -247,10 +255,12 @@ def plot_loss_curves(losses_dict, save_name="loss_curves.png"):
     plt.show()
 
 if __name__ == "__main__":
-    # Dummy Dataset for testing
-    ds = SinGapDataset()
+
+    # ds = SinGapDataset(num_samples=500)
+    # # ds = VariableDensitySinDataset(num_samples=500, density_ratio=0.1)
+    # # ds = MultiGapSinDataset(num_samples=500)
     
-    # 1. Train Marginalize BLL
+    # # 1. Train Marginalize BLL
     
     # print("\n--- Training Marginalize BLL ---")
     # model_bll = MarginalizeBLL().to(DEVICE)
@@ -259,45 +269,47 @@ if __name__ == "__main__":
     # # 2. Train LDBLL
     # print("\n--- Training LDBLL ---")
     # model_ldbll = LDBLL().to(DEVICE)
-    # # Increased beta slightly for better visual effect of regularization
     # model_ldbll, ldbll_losses = train_marginalize_ldbll(model_ldbll, ds, is_ldbll=True, beta=0.005, epochs=4500)
     
     # model_ldbll_less = LDBLL().to(DEVICE)
-    # # Increased beta slightly for better visual effect of regularization
     # model_ldbll_less, ldbll_losses_less = train_marginalize_ldbll(model_ldbll_less, ds, is_ldbll=True, beta=0.005, epochs=2000)
 
-    # # 3. Visualize Comparison
-    # # You can simply pass the models in a dictionary
     # models_to_plot = {
     #     'Marginalize BLL (Baseline)': model_bll,
     #     'LDBLL (Derivative Reg)': model_ldbll,
     #     'LDBLL (Less Training)': model_ldbll_less
     # }
-    # visualize_models(models_to_plot, ds, DEVICE, save_name="plots/bll_vs_ldbll_compare.png")
 
     # losses_to_plot = {
     #     'Marginalize BLL': bll_losses,
     #     'LDBLL': ldbll_losses,
     #     'LDBLL (Less Training)': ldbll_losses_less
     # }
-    # plot_loss_curves(losses_to_plot, save_name="plots/bll_vs_ldbll_loss_curves.png")
 
 
-    ds = SinGapDataset(num_samples=2000, gap_bounds=(-4, 4))
+    ds = SinGapDataset(num_samples=500)
+    # ds = VariableDensitySinDataset(num_samples=500, density_ratio=0.1)
 
     print("\n--- Training Hybrid ---")
     vbll = VariationalBLL().to(DEVICE)
-    vbll, vbll_losses = train_variational(vbll, ds, epochs=2000) 
+    vbll, vbll_losses = train_variational(vbll, ds, epochs=4000) 
+
+    print("\n--- Training Hybrid LDBLL ---")
+    hybrid = VariationalLDBLL().to(DEVICE)
+    hybrid, hybrid_losses = train_variational_ldbll(hybrid, ds, ld_beta=0.005, epochs=5000)
     
-    # hybrid = HybridLDBLL().to(DEVICE)
-    # hybrid = train_hybrid(hybrid, ds, beta=0.005, epochs=2000)
+    # Plotting Results
+
+    visualize_models(models_to_plot, ds, DEVICE, save_name="plots/bll_vs_ldbll_compare.png")
+    
+    plot_loss_curves(losses_to_plot, save_name="plots/bll_vs_ldbll_loss_curves.png")
     
     visualize_models({
        'Variational BLL': vbll, 
-    #    'Hybrid LDBLL': hybrid
+       'Hybrid Variational LDBLL': hybrid
     }, ds, DEVICE, save_name="plots/hybrid_compare.png")
 
     plot_loss_curves({
         'Variational BLL': vbll_losses,
-    #    'Hybrid LDBLL': hybrid_losses
+       'Hybrid Variational LDBLL': hybrid_losses
     }, save_name="plots/hybrid_loss_curves.png")
