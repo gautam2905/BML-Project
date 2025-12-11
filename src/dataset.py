@@ -5,20 +5,27 @@ from torch.utils.data import Dataset
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 class SinGapDataset(Dataset):
-    def __init__(self, num_samples=100, noise=0.1, gap_bounds=(-2, 2), seed=42):
+    def __init__(self, num_samples=100, noise=0.1, gap_bounds=(-2, 2), seed=42, manual_gap_points=None):
         self.num_samples = num_samples
         np.random.seed(seed)
         torch.manual_seed(seed)
         
-        # Generate split data to create a clean gap
+        # 1. Generate split data
         n_half = num_samples // 2
         x_left = np.random.uniform(-6, gap_bounds[0], (n_half, 1))
         x_right = np.random.uniform(gap_bounds[1], 6, (n_half, 1))
         
         self.X = np.vstack([x_left, x_right])
-        self.Y = np.sin(self.X) + noise * np.random.randn(num_samples, 1)
         
-        # Move to GPU immediately for full-batch methods
+        # 2. Add manual points if provided
+        if manual_gap_points is not None:
+            x_manual = np.array(manual_gap_points).reshape(-1, 1)
+            self.X = np.vstack([self.X, x_manual])
+
+        # 3. Generate Y for all points (main + manual)
+        self.Y = np.sin(self.X) + noise * np.random.randn(len(self.X), 1)
+        
+        # Move to GPU
         self.X = torch.tensor(self.X, dtype=torch.float32).to(DEVICE)
         self.Y = torch.tensor(self.Y, dtype=torch.float32).to(DEVICE)
 
@@ -27,7 +34,6 @@ class SinGapDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.X[idx], self.Y[idx]
-
 
 class VariableDensitySinDataset(Dataset):
     def __init__(self, num_samples=150, noise=0.1, bounds=(-6, 6), sparse_bounds=(-2, 2), density_ratio=0.1, seed=42):

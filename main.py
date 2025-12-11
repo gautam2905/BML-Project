@@ -287,7 +287,7 @@ if __name__ == "__main__":
     # }
 
 
-    ds = SinGapDataset(num_samples=500)
+    ds = SinGapDataset(num_samples=500, manual_gap_points=[0])
     # ds = VariableDensitySinDataset(num_samples=500, density_ratio=0.1)
 
     print("\n--- Training Hybrid ---")

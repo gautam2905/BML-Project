@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import torch.nn.utils.spectral_norm as sn 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -19,6 +20,15 @@ class VariationalBLL(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(hidden_dim, feature_dim) 
         )
+
+        # self.net = nn.Sequential(
+        #     sn(nn.Linear(in_dim, hidden_dim)),
+        #     nn.LeakyReLU(), 
+        #     sn(nn.Linear(hidden_dim, hidden_dim)),
+        #     nn.LeakyReLU(),
+        #     sn(nn.Linear(hidden_dim, feature_dim)) 
+        # )
+
         
         self.w_mean = nn.Parameter(torch.zeros(self.feature_dim, 1))
         
