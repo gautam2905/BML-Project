@@ -300,9 +300,9 @@ if __name__ == "__main__":
     
     # Plotting Results
 
-    visualize_models(models_to_plot, ds, DEVICE, save_name="plots/bll_vs_ldbll_compare.png")
+    # visualize_models(models_to_plot, ds, DEVICE, save_name="plots/bll_vs_ldbll_compare.png")
     
-    plot_loss_curves(losses_to_plot, save_name="plots/bll_vs_ldbll_loss_curves.png")
+    # plot_loss_curves(losses_to_plot, save_name="plots/bll_vs_ldbll_loss_curves.png")
     
     visualize_models({
        'Variational BLL': vbll, 
